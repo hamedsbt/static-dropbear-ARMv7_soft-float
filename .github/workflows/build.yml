@@ -1,0 +1,179 @@
+name: Build static Dropbear ARMv7 soft-float
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Install ARM soft-float toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git \
+            make \
+            autoconf \
+            automake \
+            gcc-arm-linux-gnueabi \
+            binutils-arm-linux-gnueabi \
+            libc6-dev-armel-cross \
+            file \
+            binutils
+
+      - name: Find latest Dropbear release tag
+        id: dropbear
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git ls-remote --tags --refs \
+            https://github.com/mkj/dropbear.git \
+            'DROPBEAR_*' |
+            awk -F/ '{print $3}' |
+            sort -V |
+            tail -n 1 > /tmp/dropbear-tag
+
+          TAG="$(cat /tmp/dropbear-tag)"
+
+          if [ -z "$TAG" ]; then
+            echo "Unable to determine latest Dropbear release tag"
+            exit 1
+          fi
+
+          echo "Latest Dropbear release: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout latest Dropbear release
+        env:
+          DROPBEAR_TAG: ${{ steps.dropbear.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          git clone --depth 1 \
+            --branch "$DROPBEAR_TAG" \
+            https://github.com/mkj/dropbear.git \
+            dropbear
+
+          cd dropbear
+
+          echo "Checked out:"
+          git describe --tags --always
+          git rev-parse HEAD
+
+      - name: Configure Dropbear
+        working-directory: dropbear
+        env:
+          CC: arm-linux-gnueabi-gcc
+          AR: arm-linux-gnueabi-ar
+          RANLIB: arm-linux-gnueabi-ranlib
+          STRIP: arm-linux-gnueabi-strip
+        run: |
+          set -euo pipefail
+
+          export CFLAGS="-march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=soft"
+          export CXXFLAGS="$CFLAGS"
+
+          ./configure \
+            --host=arm-linux-gnueabi \
+            --build="$(gcc -dumpmachine)" \
+            --enable-static \
+            --disable-zlib
+
+      - name: Build static Dropbear
+        working-directory: dropbear
+        env:
+          CC: arm-linux-gnueabi-gcc
+          AR: arm-linux-gnueabi-ar
+          RANLIB: arm-linux-gnueabi-ranlib
+          STRIP: arm-linux-gnueabi-strip
+        run: |
+          set -euo pipefail
+
+          export CFLAGS="-march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=soft"
+
+          make -j"$(nproc)" \
+            PROGRAMS="dropbear dbclient dropbearkey dropbearconvert scp"
+
+          make strip
+
+      - name: Verify ELF architecture and ABI
+        working-directory: dropbear
+        run: |
+          set -euo pipefail
+
+          echo "=== file ==="
+          file dropbear dbclient dropbearkey dropbearconvert scp
+
+          echo
+          echo "=== ELF attributes ==="
+          arm-linux-gnueabi-readelf -A dropbear
+
+          echo
+          echo "=== Dynamic dependencies ==="
+          arm-linux-gnueabi-readelf -d dropbear || true
+
+          echo
+          echo "=== ELF header ==="
+          arm-linux-gnueabi-readelf -h dropbear
+
+          echo
+          echo "=== Check for dynamic interpreter ==="
+          if arm-linux-gnueabi-readelf -l dropbear | grep -q 'Requesting program interpreter'; then
+            echo "ERROR: binary is dynamically linked"
+            exit 1
+          fi
+
+          echo
+          echo "Static ARM Dropbear verification passed."
+
+      - name: Prepare artifact
+        env:
+          DROPBEAR_TAG: ${{ steps.dropbear.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p artifact
+
+          cp dropbear/dropbear \
+             dropbear/dbclient \
+             dropbear/dropbearkey \
+             dropbear/dropbearconvert \
+             dropbear/scp \
+             artifact/
+
+          cp dropbear/.config artifact/ 2>/dev/null || true
+
+          cat > artifact/BUILD-INFO.txt <<EOF
+          Dropbear tag: ${DROPBEAR_TAG}
+          Dropbear commit: $(cd dropbear && git rev-parse HEAD)
+
+          Target:
+            ARM
+            ARMv7-A
+            EABI
+            soft-float ABI
+            VFPv3-D16
+
+          Compiler:
+            $(arm-linux-gnueabi-gcc --version | head -n1)
+
+          CFLAGS:
+            -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=soft
+          EOF
+
+      - name: Upload Dropbear binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: dropbear-${{ steps.dropbear.outputs.tag }}-armv7-softfp
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30
+
