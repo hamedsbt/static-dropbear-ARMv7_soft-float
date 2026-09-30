@@ -399,53 +399,69 @@ jobs:
       # ------------------------------------------------------------
       # Strict ARM ABI verification
       # ------------------------------------------------------------
-      - name: Verify ARMv7 soft-float ABI
+      - name: Verify ARMv7 VFPv3-D16 soft-float ABI
         working-directory: dropbear
         run: |
           set -euo pipefail
 
-          binary="./dropbear"
+          ATTRS="$(arm-linux-gnueabi-readelf -A ./dropbear)"
+          HEADER="$(arm-linux-gnueabi-readelf -h ./dropbear)"
 
-          ATTRS="$(arm-linux-gnueabi-readelf -A "$binary")"
+          echo "=== ELF header ==="
+          echo "$HEADER"
 
+          echo
+          echo "=== ARM attributes ==="
           echo "$ATTRS"
 
           echo
-          echo "=== Checking CPU architecture ==="
+          echo "=== Check CPU architecture ==="
 
           echo "$ATTRS" |
-            grep -E \
-              'Tag_CPU_arch:.*v7' >/dev/null ||
-          {
-            echo "ERROR: Tag_CPU_arch is not v7"
-            exit 1
-          }
+            grep -E 'Tag_CPU_arch:.*v7' >/dev/null || {
+              echo "ERROR: Tag_CPU_arch is not v7"
+              exit 1
+            }
+
+          echo "OK: Tag_CPU_arch: v7"
 
           echo
-          echo "=== Checking FPU ==="
+          echo "=== Check VFP architecture ==="
 
           echo "$ATTRS" |
-            grep -E \
-              'Tag_FP_arch:.*VFPv3-D16' >/dev/null ||
-          {
-            echo "ERROR: Tag_FP_arch is not VFPv3-D16"
-            exit 1
-          }
+            grep -E 'Tag_FP_arch:.*VFPv3-D16' >/dev/null || {
+              echo "ERROR: Tag_FP_arch is not VFPv3-D16"
+              exit 1
+            }
+
+          echo "OK: Tag_FP_arch: VFPv3-D16"
 
           echo
-          echo "=== Checking soft-float calling convention ==="
+          echo "=== Check soft-float calling convention ==="
 
-          # A hard-float EABI binary normally has Tag_ABI_VFP_args.
-          # With -mfloat-abi=soft it must not advertise VFP argument
-          # passing.
+          # Tag_ABI_VFP_args = 1 means VFP-register argument passing
+          # (hard-float ABI). We specifically do NOT want that.
           if echo "$ATTRS" |
-             grep -q 'Tag_ABI_VFP_args'; then
-            echo "ERROR: binary advertises VFP argument passing"
+             grep -q 'Tag_ABI_VFP_args: VFP registers'; then
+            echo "ERROR: binary uses hard-float VFP argument passing"
             exit 1
           fi
 
+          echo "OK: no VFP-register argument passing"
+
           echo
-          echo "ARMv7 / VFPv3-D16 / soft-float verification passed."
+          echo "=== Check ELF flags ==="
+
+          echo "$HEADER" |
+            grep -E 'Flags:.*Version5 EABI.*soft-float ABI' >/dev/null || {
+              echo "ERROR: ELF does not advertise soft-float ABI"
+              exit 1
+            }
+
+          echo "OK: Version5 EABI, soft-float ABI"
+
+          echo
+          echo "ARMv7 + VFPv3-D16 + soft-float ABI verification PASSED."
 
       # ------------------------------------------------------------
       # Verify crypt() is actually present in final binary
