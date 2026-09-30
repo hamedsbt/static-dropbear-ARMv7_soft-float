@@ -12,13 +12,11 @@ permissions:
 env:
   TARGET: arm-linux-gnueabi
 
-  # Required target CPU/ABI.
   TARGET_CFLAGS: >-
     -march=armv7-a
     -mfpu=vfpv3-d16
-    -mfloat-abi=soft
+    -mfloat-abi=softfp
 
-  # libxcrypt release used to provide crypt()/libcrypt.a.
   LIBXCRYPT_VERSION: "4.4.38"
 
 jobs:
@@ -27,10 +25,6 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-
-      # ------------------------------------------------------------
-      # Host dependencies
-      # ------------------------------------------------------------
       - name: Install build dependencies
         run: |
           set -euxo pipefail
@@ -52,9 +46,6 @@ jobs:
             wget \
             xz-utils
 
-      # ------------------------------------------------------------
-      # Determine latest Dropbear release tag
-      # ------------------------------------------------------------
       - name: Find latest Dropbear release
         id: dropbear
         shell: bash
@@ -70,18 +61,11 @@ jobs:
             tail -n 1
           )"
 
-          if [ -z "$TAG" ]; then
-            echo "ERROR: Could not determine latest Dropbear release"
-            exit 1
-          fi
+          test -n "$TAG"
 
           echo "Latest Dropbear release: $TAG"
-
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      # ------------------------------------------------------------
-      # Checkout Dropbear release
-      # ------------------------------------------------------------
       - name: Checkout Dropbear
         env:
           DROPBEAR_TAG: ${{ steps.dropbear.outputs.tag }}
@@ -96,15 +80,9 @@ jobs:
 
           cd dropbear
 
-          echo "Dropbear tag:"
           git describe --tags --always
-
-          echo "Dropbear commit:"
           git rev-parse HEAD
 
-      # ------------------------------------------------------------
-      # Prepare ARM sysroot
-      # ------------------------------------------------------------
       - name: Prepare ARM sysroot
         run: |
           set -euxo pipefail
@@ -116,21 +94,9 @@ jobs:
 
           sudo chown -R "$USER:$USER" /opt/arm-sysroot
 
-          # Copy the ARM libc development headers/libraries supplied
-          # by gcc-arm-linux-gnueabi/libc6-dev-armel-cross.
-          #
-          # The compiler's normal ARM sysroot remains authoritative.
-          # This directory is specifically for libcrypt.
-          echo "ARM compiler:"
           ${TARGET}-gcc --version | head -n 1
-
-          echo
-          echo "ARM compiler sysroot:"
           ${TARGET}-gcc -print-sysroot
 
-      # ------------------------------------------------------------
-      # Download libxcrypt
-      # ------------------------------------------------------------
       - name: Download libxcrypt
         run: |
           set -euxo pipefail
@@ -144,9 +110,6 @@ jobs:
             "libxcrypt-${LIBXCRYPT_VERSION}" \
             libxcrypt
 
-      # ------------------------------------------------------------
-      # Build libcrypt.a for ARM soft-float
-      # ------------------------------------------------------------
       - name: Build ARM libcrypt.a
         working-directory: libxcrypt
         env:
@@ -157,7 +120,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          export CFLAGS="${TARGET_CFLAGS} -O2 -fPIC"
+          export CFLAGS="${TARGET_CFLAGS} -O2"
           export CPPFLAGS="${TARGET_CFLAGS}"
           export LDFLAGS="${TARGET_CFLAGS}"
 
@@ -171,38 +134,16 @@ jobs:
 
           make -j"$(nproc)"
 
-          # Install into our private ARM sysroot.
           make DESTDIR=/opt/arm-sysroot install
-
-          echo
-          echo "=== libcrypt.a ==="
-
-          find /opt/arm-sysroot \
-            -name 'libcrypt.a' \
-            -o -name 'crypt.h'
 
           test -f /opt/arm-sysroot/usr/lib/libcrypt.a
           test -f /opt/arm-sysroot/usr/include/crypt.h
 
-          echo
-          echo "=== libcrypt.a architecture ==="
-
           file /opt/arm-sysroot/usr/lib/libcrypt.a
 
-      # ------------------------------------------------------------
-      # Verify that ARM libcrypt.a actually contains ARM objects
-      # ------------------------------------------------------------
       - name: Verify ARM libcrypt
         run: |
           set -euo pipefail
-
-          echo "=== libcrypt archive ==="
-          arm-linux-gnueabi-ar t \
-            /opt/arm-sysroot/usr/lib/libcrypt.a |
-            head -30
-
-          echo
-          echo "=== ARM object verification ==="
 
           FIRST_OBJECT="$(
             arm-linux-gnueabi-ar t \
@@ -224,9 +165,6 @@ jobs:
           file "$FIRST_OBJECT" |
             grep -E 'ARM|32-bit' >/dev/null
 
-      # ------------------------------------------------------------
-      # Make Dropbear configure see our ARM libcrypt
-      # ------------------------------------------------------------
       - name: Configure Dropbear
         working-directory: dropbear
         env:
@@ -239,13 +177,8 @@ jobs:
 
           export CFLAGS="${TARGET_CFLAGS}"
           export CPPFLAGS="${TARGET_CFLAGS}"
-
-          # Put our ARM libcrypt before the compiler's normal
-          # library search paths.
           export LDFLAGS="${TARGET_CFLAGS} -L/opt/arm-sysroot/usr/lib"
           export LIBS="-lcrypt"
-
-          echo "=== Test crypt() before configuring Dropbear ==="
 
           cat > /tmp/test-crypt.c <<'EOF'
           #include <crypt.h>
@@ -269,54 +202,19 @@ jobs:
 
           file /tmp/test-crypt
 
-          echo
-          echo "crypt() link test succeeded."
-
-          echo
-          echo "=== Configure Dropbear ==="
-
           ./configure \
             --host="${TARGET}" \
             --build="$(gcc -dumpmachine)" \
             --enable-static \
             --disable-zlib
 
-      # ------------------------------------------------------------
-      # Verify configure detected crypt()
-      # ------------------------------------------------------------
       - name: Verify Dropbear crypt detection
         working-directory: dropbear
         run: |
           set -euo pipefail
 
-          echo "=== config.h ==="
-          grep -n "HAVE_CRYPT" config.h || true
-
-          echo
-          echo "=== configure crypt test ==="
-
-          grep -n \
-            -A8 \
-            -B8 \
-            "crypt in -lcrypt" \
-            config.log || true
-
-          echo
-          echo "=== configured libraries ==="
-
-          grep -nE \
-            'LIBS|CRYPT|crypt' \
-            Makefile \
-            config.status \
-            config.log |
-            head -100 || true
-
-          # Dropbear must have detected crypt().
           grep -q 'HAVE_CRYPT 1' config.h
 
-      # ------------------------------------------------------------
-      # Build Dropbear
-      # ------------------------------------------------------------
       - name: Build static Dropbear
         working-directory: dropbear
         env:
@@ -337,9 +235,6 @@ jobs:
 
           make strip
 
-      # ------------------------------------------------------------
-      # Verify all binaries
-      # ------------------------------------------------------------
       - name: Verify binaries
         working-directory: dropbear
         run: |
@@ -361,142 +256,96 @@ jobs:
 
             test -f "$binary"
 
-            echo
-            echo "--- file ---"
             file "$binary"
 
-            echo
-            echo "--- ELF header ---"
             arm-linux-gnueabi-readelf -h "$binary"
-
-            echo
-            echo "--- ARM attributes ---"
             arm-linux-gnueabi-readelf -A "$binary"
-
-            echo
-            echo "--- program headers ---"
             arm-linux-gnueabi-readelf -l "$binary"
 
-            echo
-            echo "--- dynamic section ---"
-            arm-linux-gnueabi-readelf -d "$binary" || true
-
-            # No dynamic ELF interpreter.
             if arm-linux-gnueabi-readelf -l "$binary" |
                grep -q 'Requesting program interpreter'; then
               echo "ERROR: $binary has a dynamic loader"
               exit 1
             fi
 
-            # Verify ARM ELF.
             if ! file "$binary" |
                grep -q 'ARM'; then
               echo "ERROR: $binary is not ARM"
               exit 1
             fi
+
+            if arm-linux-gnueabi-readelf -d "$binary" |
+               grep -q 'NEEDED'; then
+              echo "ERROR: $binary has dynamic dependencies"
+              exit 1
+            fi
           done
 
-      # ------------------------------------------------------------
-      # Strict ARM ABI verification
-      # ------------------------------------------------------------
       - name: Verify ARMv7 VFPv3-D16 soft-float ABI
         working-directory: dropbear
         run: |
           set -euo pipefail
 
-          ATTRS="$(arm-linux-gnueabi-readelf -A ./dropbear)"
-          HEADER="$(arm-linux-gnueabi-readelf -h ./dropbear)"
+          for binary in \
+            dropbear \
+            dbclient \
+            dropbearkey \
+            dropbearconvert \
+            scp
+          do
+            echo
+            echo "=== Checking $binary ==="
 
-          echo "=== ELF header ==="
-          echo "$HEADER"
+            ATTRS="$(arm-linux-gnueabi-readelf -A "$binary")"
+            HEADER="$(arm-linux-gnueabi-readelf -h "$binary")"
 
-          echo
-          echo "=== ARM attributes ==="
-          echo "$ATTRS"
+            echo "$ATTRS"
 
-          echo
-          echo "=== Check CPU architecture ==="
+            echo "$ATTRS" |
+              grep -E 'Tag_CPU_arch:.*v7' >/dev/null || {
+                echo "ERROR: $binary: Tag_CPU_arch is not v7"
+                exit 1
+              }
 
-          echo "$ATTRS" |
-            grep -E 'Tag_CPU_arch:.*v7' >/dev/null || {
-              echo "ERROR: Tag_CPU_arch is not v7"
+            echo "$ATTRS" |
+              grep -E 'Tag_FP_arch:.*VFPv3-D16' >/dev/null || {
+                echo "ERROR: $binary: Tag_FP_arch is not VFPv3-D16"
+                exit 1
+              }
+
+            if echo "$ATTRS" |
+               grep -q 'Tag_ABI_VFP_args: VFP registers'; then
+              echo "ERROR: $binary uses hard-float VFP argument passing"
               exit 1
-            }
+            fi
 
-          echo "OK: Tag_CPU_arch: v7"
+            echo "$HEADER" |
+              grep -E 'Flags:.*Version5 EABI.*soft-float ABI' >/dev/null || {
+                echo "ERROR: $binary is not Version5 EABI soft-float"
+                exit 1
+              }
 
-          echo
-          echo "=== Check VFP architecture ==="
+            echo "OK: $binary"
+          done
 
-          echo "$ATTRS" |
-            grep -E 'Tag_FP_arch:.*VFPv3-D16' >/dev/null || {
-              echo "ERROR: Tag_FP_arch is not VFPv3-D16"
-              exit 1
-            }
-
-          echo "OK: Tag_FP_arch: VFPv3-D16"
-
-          echo
-          echo "=== Check soft-float calling convention ==="
-
-          # Tag_ABI_VFP_args = 1 means VFP-register argument passing
-          # (hard-float ABI). We specifically do NOT want that.
-          if echo "$ATTRS" |
-             grep -q 'Tag_ABI_VFP_args: VFP registers'; then
-            echo "ERROR: binary uses hard-float VFP argument passing"
-            exit 1
-          fi
-
-          echo "OK: no VFP-register argument passing"
-
-          echo
-          echo "=== Check ELF flags ==="
-
-          echo "$HEADER" |
-            grep -E 'Flags:.*Version5 EABI.*soft-float ABI' >/dev/null || {
-              echo "ERROR: ELF does not advertise soft-float ABI"
-              exit 1
-            }
-
-          echo "OK: Version5 EABI, soft-float ABI"
-
-          echo
-          echo "ARMv7 + VFPv3-D16 + soft-float ABI verification PASSED."
-
-      # ------------------------------------------------------------
-      # Verify crypt() is actually present in final binary
-      # ------------------------------------------------------------
       - name: Verify password authentication support
         working-directory: dropbear
         run: |
           set -euo pipefail
 
           echo "=== crypt symbols ==="
-
           arm-linux-gnueabi-nm dropbear |
             grep -E '(^|[[:space:]])crypt(_r)?$' || true
 
           echo
-          echo "=== libcrypt references ==="
-
-          arm-linux-gnueabi-readelf -s dropbear |
-            grep -E 'crypt(_r)?' || true
-
-          echo
           echo "=== Dynamic dependencies ==="
 
-          arm-linux-gnueabi-readelf -d dropbear || true
-
-          # A static binary should not contain a dynamic NEEDED entry.
           if arm-linux-gnueabi-readelf -d dropbear |
              grep -q 'NEEDED'; then
-            echo "ERROR: final Dropbear contains dynamic dependencies"
+            echo "ERROR: Dropbear has dynamic dependencies"
             exit 1
           fi
 
-      # ------------------------------------------------------------
-      # Create artifact
-      # ------------------------------------------------------------
       - name: Prepare artifact
         env:
           DROPBEAR_TAG: ${{ steps.dropbear.outputs.tag }}
@@ -514,10 +363,12 @@ jobs:
             scp \
             ../artifact/
 
-          cp /opt/arm-sysroot/usr/lib/libcrypt.a \
+          cp \
+            /opt/arm-sysroot/usr/lib/libcrypt.a \
             ../artifact/
 
-          cp /opt/arm-sysroot/usr/include/crypt.h \
+          cp \
+            /opt/arm-sysroot/usr/include/crypt.h \
             ../artifact/
 
           cat > ../artifact/BUILD-INFO.txt <<EOF
@@ -527,9 +378,8 @@ jobs:
           libxcrypt: ${LIBXCRYPT_VERSION}
 
           Target:
-            ARM
             ARMv7-A
-            EABI
+            EABI5
             soft-float ABI
             VFPv3-D16
 
@@ -546,18 +396,10 @@ jobs:
             static
             password authentication enabled
             zlib disabled
-
-          libcrypt:
-            static libcrypt.a
-            built from libxcrypt ${LIBXCRYPT_VERSION}
           EOF
 
-          echo "=== Artifact ==="
           ls -lh ../artifact
 
-      # ------------------------------------------------------------
-      # Upload final artifact
-      # ------------------------------------------------------------
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
