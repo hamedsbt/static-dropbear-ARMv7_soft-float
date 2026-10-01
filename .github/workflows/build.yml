@@ -443,3 +443,4 @@ steps:
         --target "$GITHUB_SHA" \
         --title "Dropbear ${UPSTREAM_VERSION} for B612s-25d" \
         --notes-file release-notes.md
+```
