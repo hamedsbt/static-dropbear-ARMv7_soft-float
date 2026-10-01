@@ -1,446 +1,454 @@
 name: Build and Release Dropbear
 
 on:
-workflow_dispatch:
-inputs:
-force_release:
-description: "Build and release the latest upstream Dropbear version even if already released"
-required: false
-default: false
-type: boolean
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: "Build and release the latest upstream Dropbear version even if already released"
+        required: false
+        default: false
+        type: boolean
 
-schedule:
-# Weekly upstream-version check.
-# GitHub scheduled workflows use UTC.
-- cron: "17 5 * * 1"
+  schedule:
+    # Weekly upstream-version check.
+    # GitHub scheduled workflows use UTC.
+    - cron: "17 5 * * 1"
 
 permissions:
-contents: write
+  contents: write
 
 concurrency:
-group: dropbear-release
-cancel-in-progress: false
+  group: dropbear-release
+  cancel-in-progress: false
 
 env:
-UPSTREAM_REPO: mkj/dropbear
-TARGET_ARCH: armv7-a
-TARGET_FPU: vfpv3-d16
-TARGET_FLOAT_ABI: softfp
-SSH_PORT: "22"
+  UPSTREAM_REPO: mkj/dropbear
+  TARGET_ARCH: armv7-a
+  TARGET_FPU: vfpv3-d16
+  TARGET_FLOAT_ABI: softfp
+  SSH_PORT: "22"
 
 jobs:
-check-upstream:
-name: Check upstream Dropbear version
-runs-on: ubuntu-latest
-outputs:
-upstream_tag: ${{ steps.upstream.outputs.upstream_tag }}
-upstream_version: ${{ steps.upstream.outputs.upstream_version }}
-release_tag: ${{ steps.upstream.outputs.release_tag }}
-already_released: ${{ steps.check_release.outputs.already_released }}
-should_release: ${{ steps.decision.outputs.should_release }}
-
-```
-steps:
-  - name: Get latest upstream release
-    id: upstream
-    shell: bash
-    run: |
-      set -euo pipefail
-
-      API_URL="https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest"
-
-      RESPONSE="$(curl --fail --silent --show-error \
-        -H "Accept: application/vnd.github+json" \
-        -H "X-GitHub-Api-Version: 2022-11-28" \
-        "$API_URL")"
-
-      UPSTREAM_TAG="$(printf '%s\n' "$RESPONSE" | jq -r '.tag_name')"
-
-      if [[ -z "$UPSTREAM_TAG" || "$UPSTREAM_TAG" == "null" ]]; then
-        echo "ERROR: Could not determine upstream release tag."
-        exit 1
-      fi
-
-      if [[ "$UPSTREAM_TAG" != DROPBEAR_* ]]; then
-        echo "ERROR: Unexpected upstream tag: $UPSTREAM_TAG"
-        exit 1
-      fi
-
-      UPSTREAM_VERSION="${UPSTREAM_TAG#DROPBEAR_}"
-      RELEASE_TAG="${UPSTREAM_TAG}_B612"
-
-      echo "Upstream tag     : $UPSTREAM_TAG"
-      echo "Upstream version : $UPSTREAM_VERSION"
-      echo "Release tag      : $RELEASE_TAG"
-
-      {
-        echo "upstream_tag=$UPSTREAM_TAG"
-        echo "upstream_version=$UPSTREAM_VERSION"
-        echo "release_tag=$RELEASE_TAG"
-      } >> "$GITHUB_OUTPUT"
-
-  - name: Check whether GitHub Release already exists
-    id: check_release
-    env:
-      GH_TOKEN: ${{ github.token }}
-      RELEASE_TAG: ${{ steps.upstream.outputs.release_tag }}
-    shell: bash
-    run: |
-      set -euo pipefail
-
-      if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-        echo "already_released=true" >> "$GITHUB_OUTPUT"
-        echo "Release already exists: $RELEASE_TAG"
-      else
-        echo "already_released=false" >> "$GITHUB_OUTPUT"
-        echo "Release does not exist: $RELEASE_TAG"
-      fi
-
-  - name: Decide whether to build and release
-    id: decision
-    env:
-      ALREADY_RELEASED: ${{ steps.check_release.outputs.already_released }}
-      FORCE_RELEASE: ${{ inputs.force_release }}
-    shell: bash
-    run: |
-      set -euo pipefail
-
-      if [[ "$FORCE_RELEASE" == "true" ]]; then
-        echo "should_release=true" >> "$GITHUB_OUTPUT"
-        echo "Manual force release requested."
-      elif [[ "$ALREADY_RELEASED" == "false" ]]; then
-        echo "should_release=true" >> "$GITHUB_OUTPUT"
-        echo "New upstream version detected."
-      else
-        echo "should_release=false" >> "$GITHUB_OUTPUT"
-        echo "No new upstream release detected."
-      fi
-```
-
-build:
-name: Build Dropbear
-needs: check-upstream
-if: needs.check-upstream.outputs.should_release == 'true'
-runs-on: ubuntu-24.04
-
-```
-steps:
-  - name: Checkout repository
-    uses: actions/checkout@v4
-
-  - name: Install build dependencies
-    shell: bash
-    run: |
-      set -euo pipefail
-
-      sudo dpkg --add-architecture armhf
-      sudo apt-get update
-
-      sudo apt-get install -y \
-        autoconf \
-        automake \
-        build-essential \
-        bzip2 \
-        ca-certificates \
-        curl \
-        file \
-        gcc-arm-linux-gnueabihf \
-        libc6-dev:armhf \
-        libcrypt-dev:armhf \
-        libtool \
-        make \
-        pkg-config \
-        unzip \
-        zip
-
-  - name: Download upstream Dropbear
-    env:
-      UPSTREAM_TAG: ${{ needs.check-upstream.outputs.upstream_tag }}
-      UPSTREAM_VERSION: ${{ needs.check-upstream.outputs.upstream_version }}
-    shell: bash
-    run: |
-      set -euo pipefail
-
-      mkdir -p source
-
-      TARBALL="dropbear-${UPSTREAM_VERSION}.tar.bz2"
-      URL="https://matt.ucc.asn.au/dropbear/releases/${TARBALL}"
-
-      echo "Downloading:"
-      echo "  $URL"
-
-      curl --fail --location --retry 3 \
-        "$URL" \
-        -o "source/$TARBALL"
-
-      tar -xjf "source/$TARBALL" -C source
-
-      test -d "source/dropbear-${UPSTREAM_VERSION}"
-
-      echo "Source directory:"
-      echo "source/dropbear-${UPSTREAM_VERSION}"
-
-  - name: Configure Dropbear for B612 ARMv7
-    env:
-      UPSTREAM_VERSION: ${{ needs.check-upstream.outputs.upstream_version }}
-    working-directory: source
-    shell: bash
-    run: |
-      set -euo pipefail
-
-      cd "dropbear-${UPSTREAM_VERSION}"
-
-      export CC=arm-linux-gnueabihf-gcc
-      export AR=arm-linux-gnueabihf-ar
-      export RANLIB=arm-linux-gnueabihf-ranlib
-      export STRIP=arm-linux-gnueabihf-strip
-
-      export CFLAGS="-march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=softfp -Os"
-      export LDFLAGS="-static"
-
-      ./configure \
-        --host=arm-linux-gnueabihf \
-        --disable-zlib \
-        --disable-lastlog \
-        --disable-utmp \
-        --disable-wtmp
-
-  - name: Build Dropbear server and key generator
-    env:
-      UPSTREAM_VERSION: ${{ needs.check-upstream.outputs.upstream_version }}
-    working-directory: source
-    shell: bash
-    run: |
-      set -euo pipefail
-
-      cd "dropbear-${UPSTREAM_VERSION}"
-
-      export CC=arm-linux-gnueabihf-gcc
-      export AR=arm-linux-gnueabihf-ar
-      export RANLIB=arm-linux-gnueabihf-ranlib
-      export STRIP=arm-linux-gnueabihf-strip
-
-      export CFLAGS="-march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=softfp -Os"
-      export LDFLAGS="-static"
-
-      make -j"$(nproc)"
-
-      test -f dropbear
-      test -f dropbearkey
-
-      file dropbear
-      file dropbearkey
-
-      "$STRIP" dropbear
-      "$STRIP" dropbearkey
-
-      file dropbear
-      file dropbearkey
-
-  - name: Verify target architecture and static linking
-    env:
-      UPSTREAM_VERSION: ${{ needs.check-upstream.outputs.upstream_version }}
-    working-directory: source
-    shell: bash
-    run: |
-      set -euo pipefail
-
-      cd "dropbear-${UPSTREAM_VERSION}"
-
-      echo "=== dropbear ==="
-      file dropbear
-      readelf -h dropbear | grep -E 'Class|Machine'
-      readelf -l dropbear | grep INTERP || true
-
-      echo
-      echo "=== dropbearkey ==="
-      file dropbearkey
-      readelf -h dropbearkey | grep -E 'Class|Machine'
-      readelf -l dropbearkey | grep INTERP || true
-
-      echo
-      echo "Static-link verification:"
-      if readelf -l dropbear | grep -q INTERP; then
-        echo "ERROR: dropbear contains a dynamic ELF interpreter."
-        exit 1
-      fi
-
-      if readelf -l dropbearkey | grep -q INTERP; then
-        echo "ERROR: dropbearkey contains a dynamic ELF interpreter."
-        exit 1
-      fi
-
-  - name: Verify Dropbear version
-    env:
-      UPSTREAM_VERSION: ${{ needs.check-upstream.outputs.upstream_version }}
-    working-directory: source
-    shell: bash
-    run: |
-      set -euo pipefail
-
-      cd "dropbear-${UPSTREAM_VERSION}"
-
-      VERSION_OUTPUT="$(./dropbear -V 2>&1 || true)"
-
-      echo "$VERSION_OUTPUT"
-
-      echo "$VERSION_OUTPUT" | grep -F "Dropbear v${UPSTREAM_VERSION}" >/dev/null
-
-  - name: Prepare release package
-    env:
-      UPSTREAM_VERSION: ${{ needs.check-upstream.outputs.upstream_version }}
-      RELEASE_TAG: ${{ needs.check-upstream.outputs.release_tag }}
-    shell: bash
-    run: |
-      set -euo pipefail
-
-      PACKAGE_DIR="release"
-      PACKAGE_NAME="DROPBEAR_${UPSTREAM_VERSION}_armv7_soft-float_static_B612-25d"
-      PACKAGE_PATH="${PACKAGE_DIR}/${PACKAGE_NAME}"
-
-      rm -rf "$PACKAGE_DIR"
-      mkdir -p "$PACKAGE_PATH"
-
-      cp "source/dropbear-${UPSTREAM_VERSION}/dropbear" \
-        "$PACKAGE_PATH/dropbear"
-
-      cp "source/dropbear-${UPSTREAM_VERSION}/dropbearkey" \
-        "$PACKAGE_PATH/dropbearkey"
-
-      cp install-dropbear.sh \
-        "$PACKAGE_PATH/install-dropbear.sh"
-
-      cp install-dropbear.bat \
-        "$PACKAGE_PATH/install-dropbear.bat"
-
-      chmod +x \
-        "$PACKAGE_PATH/dropbear" \
-        "$PACKAGE_PATH/dropbearkey" \
-        "$PACKAGE_PATH/install-dropbear.sh"
-
-      cat > "$PACKAGE_PATH/BUILD-INFO.txt" <<EOF
-      Huawei B612s-25d Dropbear build
-
-      Upstream repository:
-      https://github.com/mkj/dropbear
-
-      Upstream tag:
-      DROPBEAR_${UPSTREAM_VERSION}
-
-      GitHub release:
-      ${RELEASE_TAG}
-
-      Target:
-      ARMv7-A
-
-      FPU:
-      VFPv3-D16
-
-      Floating-point ABI:
-      softfp
-
-      Linking:
-      static
-
-      Runtime binaries:
-      dropbear
-      dropbearkey
-
-      Generated by:
-      GitHub Actions
-
-      Persistent startup:
-      /system/etc/autorun.sh
-        -> /system/bin/dropbear-start
-
-      Root authorized_keys directory:
-      Determined from /etc/passwd at installation time
-
-      Default SSH port:
-      22
-      EOF
-
-      (
-        cd "$PACKAGE_DIR"
-        zip -r -9 \
-          "${PACKAGE_NAME}.zip" \
-          "$PACKAGE_NAME"
-      )
-
-      echo "PACKAGE_NAME=$PACKAGE_NAME" >> "$GITHUB_ENV"
-      echo "PACKAGE_ZIP=${PACKAGE_NAME}.zip" >> "$GITHUB_ENV"
-
-      echo
-      echo "Release package:"
-      ls -lh "$PACKAGE_DIR/${PACKAGE_NAME}.zip"
-
-      echo
-      echo "Package contents:"
-      unzip -l "$PACKAGE_DIR/${PACKAGE_NAME}.zip"
-
-  - name: Upload build artifact
-    uses: actions/upload-artifact@v4
-    with:
-      name: ${{ env.PACKAGE_NAME }}
-      path: release/${{ env.PACKAGE_ZIP }}
-      if-no-files-found: error
-      retention-days: 30
-
-  - name: Create GitHub Release
-    env:
-      GH_TOKEN: ${{ github.token }}
-      RELEASE_TAG: ${{ needs.check-upstream.outputs.release_tag }}
-      UPSTREAM_TAG: ${{ needs.check-upstream.outputs.upstream_tag }}
-      UPSTREAM_VERSION: ${{ needs.check-upstream.outputs.upstream_version }}
-      PACKAGE_ZIP: ${{ env.PACKAGE_ZIP }}
-    shell: bash
-    run: |
-      set -euo pipefail
-
-      if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-        echo "Release already exists: $RELEASE_TAG"
-        exit 0
-      fi
-
-      cat > release-notes.md <<EOF
-      # Dropbear ${UPSTREAM_VERSION} for Huawei B612s-25d
-
-      Upstream release: \`${UPSTREAM_TAG}\`
-
-      Target:
-      - ARMv7-A
-      - VFPv3-D16
-      - softfp floating-point ABI
-      - statically linked
-
-      Included:
-      - \`dropbear\`
-      - \`dropbearkey\`
-      - \`install-dropbear.sh\`
-      - \`install-dropbear.bat\`
-
-      The installer:
-      - requests root ADB
-      - remounts \`/system\` read-write
-      - installs Dropbear under \`/system/bin\`
-      - creates persistent Dropbear host keys
-      - determines root's home directory from \`/etc/passwd\`
-      - uses the resulting \`.ssh\` directory for \`authorized_keys\`
-      - installs \`/system/bin/dropbear-start\`
-      - hooks persistent startup through \`/system/etc/autorun.sh\`
-      - waits for \`br0\` to have the router LAN address before starting Dropbear
-      - does not start Dropbear during installation
-      - requires a router reboot after installation
-
-      Default SSH port: \`22\`
-
-      Generated automatically by GitHub Actions.
-      EOF
-
-      gh release create "$RELEASE_TAG" \
-        "release/$PACKAGE_ZIP" \
-        --repo "$GITHUB_REPOSITORY" \
-        --target "$GITHUB_SHA" \
-        --title "Dropbear ${UPSTREAM_VERSION} for B612s-25d" \
-        --notes-file release-notes.md
-```
+  check-upstream:
+    name: Check upstream Dropbear version
+    runs-on: ubuntu-latest
+
+    outputs:
+      upstream_tag: ${{ steps.upstream.outputs.upstream_tag }}
+      upstream_version: ${{ steps.upstream.outputs.upstream_version }}
+      release_tag: ${{ steps.upstream.outputs.release_tag }}
+      already_released: ${{ steps.check_release.outputs.already_released }}
+      should_release: ${{ steps.decision.outputs.should_release }}
+
+    steps:
+      - name: Get latest upstream release
+        id: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          API_URL="https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest"
+
+          RESPONSE="$(curl --fail --silent --show-error \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$API_URL")"
+
+          UPSTREAM_TAG="$(printf '%s\n' "$RESPONSE" | jq -r '.tag_name')"
+
+          if [[ -z "$UPSTREAM_TAG" || "$UPSTREAM_TAG" == "null" ]]; then
+            echo "ERROR: Could not determine upstream release tag."
+            exit 1
+          fi
+
+          if [[ "$UPSTREAM_TAG" != DROPBEAR_* ]]; then
+            echo "ERROR: Unexpected upstream tag: $UPSTREAM_TAG"
+            exit 1
+          fi
+
+          UPSTREAM_VERSION="${UPSTREAM_TAG#DROPBEAR_}"
+          RELEASE_TAG="${UPSTREAM_TAG}_B612"
+
+          echo "Upstream tag     : $UPSTREAM_TAG"
+          echo "Upstream version : $UPSTREAM_VERSION"
+          echo "Release tag      : $RELEASE_TAG"
+
+          {
+            echo "upstream_tag=$UPSTREAM_TAG"
+            echo "upstream_version=$UPSTREAM_VERSION"
+            echo "release_tag=$RELEASE_TAG"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check whether GitHub Release already exists
+        id: check_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.upstream.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if gh release view "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "already_released=true" >> "$GITHUB_OUTPUT"
+            echo "Release already exists: $RELEASE_TAG"
+          else
+            echo "already_released=false" >> "$GITHUB_OUTPUT"
+            echo "Release does not exist: $RELEASE_TAG"
+          fi
+
+      - name: Decide whether to build and release
+        id: decision
+        env:
+          ALREADY_RELEASED: ${{ steps.check_release.outputs.already_released }}
+          FORCE_RELEASE: ${{ inputs.force_release }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$FORCE_RELEASE" == "true" ]]; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "Manual force release requested."
+          elif [[ "$ALREADY_RELEASED" == "false" ]]; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "New upstream version detected."
+          else
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "No new upstream release detected."
+          fi
+
+  build:
+    name: Build Dropbear
+    needs: check-upstream
+    if: needs.check-upstream.outputs.should_release == 'true'
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo dpkg --add-architecture armhf
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            autoconf \
+            automake \
+            build-essential \
+            bzip2 \
+            ca-certificates \
+            curl \
+            file \
+            gcc-arm-linux-gnueabihf \
+            libc6-dev:armhf \
+            libcrypt-dev:armhf \
+            libtool \
+            make \
+            pkg-config \
+            unzip \
+            zip
+
+      - name: Download upstream Dropbear
+        env:
+          UPSTREAM_VERSION: ${{ needs.check-upstream.outputs.upstream_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p source
+
+          TARBALL="dropbear-${UPSTREAM_VERSION}.tar.bz2"
+          URL="https://matt.ucc.asn.au/dropbear/releases/${TARBALL}"
+
+          echo "Downloading:"
+          echo "  $URL"
+
+          curl --fail --location --retry 3 \
+            "$URL" \
+            -o "source/$TARBALL"
+
+          tar -xjf "source/$TARBALL" -C source
+
+          test -d "source/dropbear-${UPSTREAM_VERSION}"
+
+          echo "Source directory:"
+          echo "source/dropbear-${UPSTREAM_VERSION}"
+
+      - name: Configure Dropbear for B612 ARMv7
+        env:
+          UPSTREAM_VERSION: ${{ needs.check-upstream.outputs.upstream_version }}
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "dropbear-${UPSTREAM_VERSION}"
+
+          export CC=arm-linux-gnueabihf-gcc
+          export AR=arm-linux-gnueabihf-ar
+          export RANLIB=arm-linux-gnueabihf-ranlib
+          export STRIP=arm-linux-gnueabihf-strip
+
+          export CFLAGS="-march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=softfp -Os"
+          export LDFLAGS="-static"
+
+          ./configure \
+            --host=arm-linux-gnueabihf \
+            --disable-zlib \
+            --disable-lastlog \
+            --disable-utmp \
+            --disable-wtmp
+
+      - name: Build Dropbear server and key generator
+        env:
+          UPSTREAM_VERSION: ${{ needs.check-upstream.outputs.upstream_version }}
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "dropbear-${UPSTREAM_VERSION}"
+
+          export CC=arm-linux-gnueabihf-gcc
+          export AR=arm-linux-gnueabihf-ar
+          export RANLIB=arm-linux-gnueabihf-ranlib
+          export STRIP=arm-linux-gnueabihf-strip
+
+          export CFLAGS="-march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=softfp -Os"
+          export LDFLAGS="-static"
+
+          make -j"$(nproc)"
+
+          test -f dropbear
+          test -f dropbearkey
+
+          file dropbear
+          file dropbearkey
+
+          "$STRIP" dropbear
+          "$STRIP" dropbearkey
+
+          file dropbear
+          file dropbearkey
+
+      - name: Verify target architecture and static linking
+        env:
+          UPSTREAM_VERSION: ${{ needs.check-upstream.outputs.upstream_version }}
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "dropbear-${UPSTREAM_VERSION}"
+
+          echo "=== dropbear ==="
+          file dropbear
+          readelf -h dropbear | grep -E 'Class|Machine'
+          readelf -l dropbear | grep INTERP || true
+
+          echo
+          echo "=== dropbearkey ==="
+          file dropbearkey
+          readelf -h dropbearkey | grep -E 'Class|Machine'
+          readelf -l dropbearkey | grep INTERP || true
+
+          echo
+          echo "Static-link verification:"
+
+          if readelf -l dropbear | grep -q INTERP; then
+            echo "ERROR: dropbear contains a dynamic ELF interpreter."
+            exit 1
+          fi
+
+          if readelf -l dropbearkey | grep -q INTERP; then
+            echo "ERROR: dropbearkey contains a dynamic ELF interpreter."
+            exit 1
+          fi
+
+      - name: Verify Dropbear version
+        env:
+          UPSTREAM_VERSION: ${{ needs.check-upstream.outputs.upstream_version }}
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "dropbear-${UPSTREAM_VERSION}"
+
+          VERSION_OUTPUT="$(./dropbear -V 2>&1 || true)"
+
+          echo "$VERSION_OUTPUT"
+
+          echo "$VERSION_OUTPUT" |
+            grep -F "Dropbear v${UPSTREAM_VERSION}" >/dev/null
+
+      - name: Prepare release package
+        env:
+          UPSTREAM_VERSION: ${{ needs.check-upstream.outputs.upstream_version }}
+          RELEASE_TAG: ${{ needs.check-upstream.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PACKAGE_DIR="release"
+          PACKAGE_NAME="DROPBEAR_${UPSTREAM_VERSION}_armv7_soft-float_static_B612-25d"
+          PACKAGE_PATH="${PACKAGE_DIR}/${PACKAGE_NAME}"
+
+          rm -rf "$PACKAGE_DIR"
+          mkdir -p "$PACKAGE_PATH"
+
+          cp \
+            "source/dropbear-${UPSTREAM_VERSION}/dropbear" \
+            "$PACKAGE_PATH/dropbear"
+
+          cp \
+            "source/dropbear-${UPSTREAM_VERSION}/dropbearkey" \
+            "$PACKAGE_PATH/dropbearkey"
+
+          cp \
+            install-dropbear.sh \
+            "$PACKAGE_PATH/install-dropbear.sh"
+
+          cp \
+            install-dropbear.bat \
+            "$PACKAGE_PATH/install-dropbear.bat"
+
+          chmod +x \
+            "$PACKAGE_PATH/dropbear" \
+            "$PACKAGE_PATH/dropbearkey" \
+            "$PACKAGE_PATH/install-dropbear.sh"
+
+                      cat > "$PACKAGE_PATH/BUILD-INFO.txt" <<EOF
+            Huawei B612s-25d Dropbear build
+            
+            Upstream repository:
+            https://github.com/mkj/dropbear
+            
+            Upstream tag:
+            DROPBEAR_${UPSTREAM_VERSION}
+            
+            GitHub release:
+            ${RELEASE_TAG}
+            
+            Target:
+            ARMv7-A
+            
+            FPU:
+            VFPv3-D16
+            
+            Floating-point ABI:
+            softfp
+            
+            Linking:
+            static
+            
+            Runtime binaries:
+            dropbear
+            dropbearkey
+            
+            Generated by:
+            GitHub Actions
+            
+            Persistent startup:
+            /system/etc/autorun.sh
+              -> /system/bin/dropbear-start
+            
+            Root authorized_keys directory:
+            Determined from /etc/passwd at installation time
+            
+            Default SSH port:
+            22
+            EOF
+
+          (
+            cd "$PACKAGE_DIR"
+
+            zip -r -9 \
+              "${PACKAGE_NAME}.zip" \
+              "$PACKAGE_NAME"
+          )
+
+          echo "PACKAGE_NAME=$PACKAGE_NAME" >> "$GITHUB_ENV"
+          echo "PACKAGE_ZIP=${PACKAGE_NAME}.zip" >> "$GITHUB_ENV"
+
+          echo
+          echo "Release package:"
+          ls -lh "$PACKAGE_DIR/${PACKAGE_NAME}.zip"
+
+          echo
+          echo "Package contents:"
+          unzip -l "$PACKAGE_DIR/${PACKAGE_NAME}.zip"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE_NAME }}
+          path: release/${{ env.PACKAGE_ZIP }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.check-upstream.outputs.release_tag }}
+          UPSTREAM_TAG: ${{ needs.check-upstream.outputs.upstream_tag }}
+          UPSTREAM_VERSION: ${{ needs.check-upstream.outputs.upstream_version }}
+          PACKAGE_ZIP: ${{ env.PACKAGE_ZIP }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if gh release view "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release already exists: $RELEASE_TAG"
+            exit 0
+          fi
+
+          cat > release-notes.md <<EOF
+            # Dropbear ${UPSTREAM_VERSION} for Huawei B612s-25d
+            
+            Upstream release: \`${UPSTREAM_TAG}\`
+            
+            Target:
+            
+            - ARMv7-A
+            - VFPv3-D16
+            - softfp floating-point ABI
+            - statically linked
+            
+            Included:
+            
+            - \`dropbear\`
+            - \`dropbearkey\`
+            - \`install-dropbear.sh\`
+            - \`install-dropbear.bat\`
+            
+            The installer:
+            
+            - requests root ADB
+            - remounts \`/system\` read-write
+            - installs Dropbear under \`/system/bin\`
+            - creates persistent Dropbear host keys
+            - determines root's home directory from \`/etc/passwd\`
+            - uses the resulting \`.ssh\` directory for \`authorized_keys\`
+            - installs \`/system/bin/dropbear-start\`
+            - hooks persistent startup through \`/system/etc/autorun.sh\`
+            - waits for \`br0\` to have the router LAN address before starting Dropbear
+            - does not start Dropbear during installation
+            - requires a router reboot after installation
+            
+            Default SSH port: \`22\`
+            
+            Generated automatically by GitHub Actions.
+            EOF
+
+          gh release create "$RELEASE_TAG" \
+            "release/$PACKAGE_ZIP" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Dropbear ${UPSTREAM_VERSION} for B612s-25d" \
+            --notes-file release-notes.md
