@@ -204,8 +204,8 @@ jobs:
 
           cd /tmp
 
-          wget -q \
-            "https://github.com/bminor/libxcrypt/releases/download/v${LIBXCRYPT_VERSION}/libxcrypt-${LIBXCRYPT_VERSION}.tar.xz"
+          wget -q --show-progress \
+            "https://github.com/besser82/libxcrypt/releases/download/v${LIBXCRYPT_VERSION}/libxcrypt-${LIBXCRYPT_VERSION}.tar.xz"
 
           tar -xf "libxcrypt-${LIBXCRYPT_VERSION}.tar.xz"
 
@@ -230,7 +230,7 @@ jobs:
           found=0
 
           while IFS= read -r obj; do
-            if file "$obj" | grep -q 'ARM'; then
+            if ar p /opt/arm-sysroot/usr/lib/libcrypt.a "$obj" | file - | grep -q 'ARM'; then
               echo "OK: $obj"
               found=1
               break
@@ -531,4 +531,3 @@ jobs:
             --title "Dropbear ${UPSTREAM_VERSION} - Huawei B612-25d" \
             --notes-file release-notes.md \
             "$PACKAGE_ZIP"
-            
