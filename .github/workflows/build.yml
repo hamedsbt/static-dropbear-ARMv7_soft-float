@@ -146,6 +146,8 @@ jobs:
             automake \
             autopoint \
             build-essential \
+            binutils-arm-linux-gnueabi \
+            gcc-arm-linux-gnueabi \
             ca-certificates \
             file \
             git \
