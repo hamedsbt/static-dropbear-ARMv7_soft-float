@@ -136,13 +136,12 @@ jobs:
 
           sudo dpkg --add-architecture armhf
 
-          # Ubuntu 24.04/Noble does not provide ARMHF package indexes
-          # from archive.ubuntu.com/security.ubuntu.com.
+          # Ubuntu Noble ARMHF packages are provided through
+          # the Ubuntu Ports archive.
           #
-          # ARMHF packages are provided by the Ubuntu ports archive.
-          #
-          # Keep the native amd64 repositories restricted to amd64 so APT
-          # does not try to fetch binary-armhf from the normal archives.
+          # Keep native amd64 repositories restricted to amd64
+          # so APT does not request binary-armhf indexes from
+          # archive.ubuntu.com or security.ubuntu.com.
 
           sudo rm -f /etc/apt/sources.list.d/*.sources
           sudo rm -f /etc/apt/sources.list.d/*.list
@@ -201,9 +200,9 @@ jobs:
           echo
           echo "=== Target architecture ==="
           arm-linux-gnueabihf-gcc \
-            -march=armv7-a \
-            -mfpu=vfpv3-d16 \
-            -mfloat-abi=softfp \
+            -march="${TARGET_ARCH}" \
+            -mfpu="${TARGET_FPU}" \
+            -mfloat-abi="${TARGET_FLOAT_ABI}" \
             -dumpmachine
 
       - name: Download upstream Dropbear
@@ -229,8 +228,65 @@ jobs:
 
           test -d "source/dropbear-${UPSTREAM_VERSION}"
 
+          echo
           echo "Source directory:"
           echo "source/dropbear-${UPSTREAM_VERSION}"
+
+      - name: Diagnose ARMHF compiler and linker
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== Cross compiler ==="
+          arm-linux-gnueabihf-gcc --version
+
+          echo
+          echo "=== Target ==="
+          arm-linux-gnueabihf-gcc -dumpmachine
+
+          echo
+          echo "=== Compiler search directories ==="
+          arm-linux-gnueabihf-gcc -print-search-dirs
+
+          echo
+          echo "=== ARMHF development packages ==="
+          dpkg-query -W -f='${Package} ${Version}\n' \
+            libc6-dev:armhf \
+            libcrypt-dev:armhf \
+            libgcc-dev:armhf \
+            2>/dev/null || true
+
+          echo
+          echo "=== Direct ARMHF compile/link test ==="
+
+          cat > /tmp/b612-test.c <<'EOF'
+          #include <stdio.h>
+
+          int main(void)
+          {
+              puts("B612 ARMHF compiler test");
+              return 0;
+          }
+          EOF
+
+          arm-linux-gnueabihf-gcc \
+            -march="${TARGET_ARCH}" \
+            -mfpu="${TARGET_FPU}" \
+            -mfloat-abi="${TARGET_FLOAT_ABI}" \
+            /tmp/b612-test.c \
+            -o /tmp/b612-test
+
+          echo
+          echo "=== Test executable ==="
+          file /tmp/b612-test
+
+          echo
+          echo "=== Test ELF headers ==="
+          arm-linux-gnueabihf-readelf -h /tmp/b612-test
+
+          echo
+          echo "=== Test ELF program headers ==="
+          arm-linux-gnueabihf-readelf -l /tmp/b612-test
 
       - name: Configure Dropbear for B612 ARMv7
         env:
@@ -247,11 +303,18 @@ jobs:
           export RANLIB=arm-linux-gnueabihf-ranlib
           export STRIP=arm-linux-gnueabihf-strip
 
-          export CFLAGS="-march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=softfp -Os"
-          export LDFLAGS="-static"
+          export CFLAGS="-march=${TARGET_ARCH} -mfpu=${TARGET_FPU} -mfloat-abi=${TARGET_FLOAT_ABI} -Os"
+
+          echo "=== Dropbear configure ==="
+          echo "CC      : $CC"
+          echo "CFLAGS  : $CFLAGS"
+          echo "BUILD   : x86_64-linux-gnu"
+          echo "HOST    : arm-linux-gnueabihf"
 
           ./configure \
+            --build=x86_64-linux-gnu \
             --host=arm-linux-gnueabihf \
+            --enable-static \
             --disable-zlib \
             --disable-lastlog \
             --disable-utmp \
@@ -272,14 +335,19 @@ jobs:
           export RANLIB=arm-linux-gnueabihf-ranlib
           export STRIP=arm-linux-gnueabihf-strip
 
-          export CFLAGS="-march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=softfp -Os"
-          export LDFLAGS="-static"
+          export CFLAGS="-march=${TARGET_ARCH} -mfpu=${TARGET_FPU} -mfloat-abi=${TARGET_FLOAT_ABI} -Os"
 
-          make -j"$(nproc)"
+          # Dropbear requires a clean rebuild when the PROGRAMS
+          # selection is changed.
+          make clean
+
+          make -j"$(nproc)" \
+            PROGRAMS="dropbear dropbearkey"
 
           test -f dropbear
           test -f dropbearkey
 
+          echo
           echo "=== Before strip ==="
           file dropbear
           file dropbearkey
@@ -304,12 +372,20 @@ jobs:
 
           echo "=== dropbear ELF ==="
           file dropbear
-          readelf -h dropbear | grep -E 'Class|Machine'
+
+          echo
+          echo "=== dropbear ELF headers ==="
+          readelf -h dropbear |
+            grep -E 'Class|Data|Machine|Flags'
 
           echo
           echo "=== dropbearkey ELF ==="
           file dropbearkey
-          readelf -h dropbearkey | grep -E 'Class|Machine'
+
+          echo
+          echo "=== dropbearkey ELF headers ==="
+          readelf -h dropbearkey |
+            grep -E 'Class|Data|Machine|Flags'
 
           echo
           echo "=== Dynamic interpreter check ==="
@@ -356,6 +432,7 @@ jobs:
           PACKAGE_PATH="${PACKAGE_DIR}/${PACKAGE_NAME}"
 
           rm -rf "$PACKAGE_DIR"
+
           mkdir -p "$PACKAGE_PATH"
 
           cp \
@@ -392,13 +469,13 @@ jobs:
             ${RELEASE_TAG}
             
             Target:
-            ARMv7-A
+            ${TARGET_ARCH}
             
             FPU:
-            VFPv3-D16
+            ${TARGET_FPU}
             
             Floating-point ABI:
-            softfp
+            ${TARGET_FLOAT_ABI}
             
             Linking:
             static
