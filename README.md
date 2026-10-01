@@ -56,6 +56,58 @@ No modification of `/init.rc` or `/init.huawei.rc` is required.
 - Weekly upstream Dropbear version detection
 - Automatic GitHub Release creation for new upstream versions
 
+## ⚠️ Password Authentication Notice
+
+### Password login is not supported on this Huawei B612 firmware
+
+On the Huawei B612s-25d / P750 firmware tested with this project, SSH password authentication does not work reliably because of the way the Huawei/Android-based system handles the root password database.
+
+The device contains:
+
+```text
+/system/etc/passwd
+```
+
+with the root account represented as:
+
+```text
+root::0:0:root:/data/root-home:/bin/sh
+```
+
+There is also no usable:
+
+```text
+/etc/shadow
+```
+
+file on the tested firmware.
+
+Although the built-in BusyBox `passwd` command accepts a password change, the password hash is not persisted in a form that Dropbear can use for SSH password authentication. Consequently, Dropbear rejects password authentication even when the password appears to have been successfully changed locally.
+
+This is a limitation of the Huawei firmware's account/password implementation, not a networking or SSH connectivity problem.
+
+### Use SSH public-key authentication instead
+
+This project is therefore designed to use SSH public-key authentication.
+
+Place your public key in:
+
+```text
+/data/root-home/.ssh/authorized_keys
+```
+
+The corresponding private key remains on your computer.
+
+For example:
+
+```sh
+ssh -i ~/.ssh/your_private_key root@192.168.0.217
+```
+
+Do **not** rely on the router's `passwd` command to enable SSH password login.
+
+Dropbear officially supports RSA, Ed25519, and ECDSA keys through `authorized_keys`.
+
 ## Repository layout
 
 ```text
