@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 
 set -e
+set -u
 
 # ============================================================
-# Huawei B612s-25d / P750 Dropbear Installer
+# Huawei B612s-25d Dropbear Installer
 #
-# ADB endpoint : 192.168.0.217:5555
+# ADB endpoint : supplied by user, default 192.168.8.1:5555
 # Router IP    : extracted from DEVICE
 # SSH address  : ${ROUTER_IP}:22
 #
@@ -21,13 +22,41 @@ set -e
 # Reboot is required.
 # ============================================================
 
-set -u
+# ------------------------------------------------------------
+# Connection parameters
+# ------------------------------------------------------------
 
-DEVICE="192.168.0.217:5555"
-ROUTER_IP="${DEVICE%:*}"
+DEFAULT_DEVICE="192.168.8.1:5555"
 SSH_PORT="22"
 
+if [ "$#" -ge 1 ] && [ -n "$1" ]; then
+    DEVICE="$1"
+else
+    DEVICE="$DEFAULT_DEVICE"
+fi
+
+# Accept either:
+#   192.168.8.1:5555
+# or:
+#   192.168.8.1
+#
+# If no ADB port is supplied, use TCP port 5555.
+
+case "$DEVICE" in
+    *:*)
+        ROUTER_IP="${DEVICE%:*}"
+        ;;
+    *)
+        ROUTER_IP="$DEVICE"
+        DEVICE="${DEVICE}:5555"
+        ;;
+esac
+
 ADB=(adb -s "$DEVICE")
+
+echo "ADB device : $DEVICE"
+echo "Router IP  : $ROUTER_IP"
+echo "SSH port   : $SSH_PORT"
 
 DROPBEAR_LOCAL="./dropbear"
 DROPBEARKEY_LOCAL="./dropbearkey"
@@ -47,7 +76,7 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 echo
 echo "============================================================"
-echo " Huawei B612s-25d / P750 Dropbear Installer"
+echo " Huawei B612s-25d Dropbear Installer"
 echo "============================================================"
 echo " ADB endpoint : $DEVICE"
 echo " Router IP    : $ROUTER_IP"
@@ -117,7 +146,7 @@ case "$ROOT_CHECK" in
 esac
 
 # ------------------------------------------------------------
-# 4/12 - Device
+# 4/12 - Device and root home directory
 # ------------------------------------------------------------
 
 echo "[4/12] Checking device..."
@@ -133,6 +162,50 @@ case "$UNAME" in
         ;;
 esac
 
+echo
+echo "Extracting root home directory from /etc/passwd..."
+
+ROOT_PASSWD_ENTRY="$(
+    "${ADB[@]}" shell 'busyboxx grep "^root:" /etc/passwd' 2>/dev/null |
+    tr -d '\r'
+)"
+
+if [ -z "$ROOT_PASSWD_ENTRY" ]; then
+    echo "ERROR: Could not find root entry in /etc/passwd."
+    exit 1
+fi
+
+# /etc/passwd format:
+#
+# name:password:UID:GID:GECOS:directory:shell
+#
+# Field 6 = user's home directory.
+
+ROOT_HOME="$(
+    printf '%s\n' "$ROOT_PASSWD_ENTRY" |
+    cut -d: -f6
+)"
+
+if [ -z "$ROOT_HOME" ]; then
+    echo "ERROR: Root home directory is empty."
+    exit 1
+fi
+
+case "$ROOT_HOME" in
+    /*)
+        ;;
+    *)
+        echo "ERROR: Root home directory is not absolute: $ROOT_HOME"
+        exit 1
+        ;;
+esac
+
+ROOT_SSH_DIR="${ROOT_HOME}/.ssh"
+
+echo "Root passwd entry : $ROOT_PASSWD_ENTRY"
+echo "Root home          : $ROOT_HOME"
+echo "Root SSH directory : $ROOT_SSH_DIR"
+
 # ------------------------------------------------------------
 # 5/12 - Mounts
 # ------------------------------------------------------------
@@ -145,7 +218,10 @@ echo "[5/12] Remounting /system..."
     true
 '
 
-SYSTEM_MOUNT="$("${ADB[@]}" shell 'mount | grep " /system "' 2>/dev/null | tr -d '\r')"
+SYSTEM_MOUNT="$(
+    "${ADB[@]}" shell 'mount | grep " /system "' 2>/dev/null |
+    tr -d '\r'
+)"
 
 echo "$SYSTEM_MOUNT"
 
@@ -168,6 +244,17 @@ echo "[6/12] Creating Dropbear directories..."
     mkdir -p '$DROPBEAR_DIR'
     chmod 0755 '$SYSTEM_BIN'
     chmod 0700 '$DROPBEAR_DIR'
+
+    # Root SSH directory is derived from /etc/passwd.
+    mkdir -p '$ROOT_SSH_DIR'
+    chown root:root '$ROOT_SSH_DIR'
+    chmod 0700 '$ROOT_SSH_DIR'
+
+    # Preserve an existing authorized_keys file.
+    if [ -f '$ROOT_SSH_DIR/authorized_keys' ]; then
+        chown root:root '$ROOT_SSH_DIR/authorized_keys'
+        chmod 0600 '$ROOT_SSH_DIR/authorized_keys'
+    fi
 "
 
 # ------------------------------------------------------------
@@ -197,15 +284,23 @@ echo "[8/12] Generating Dropbear host keys..."
 
 "${ADB[@]}" shell "
     if [ ! -s '$DROPBEAR_DIR/dropbear_rsa_host_key' ]; then
-        '$DROPBEARKEY_REMOTE' -t rsa -f '$DROPBEAR_DIR/dropbear_rsa_host_key' -s 2048
+        '$DROPBEARKEY_REMOTE' \
+            -t rsa \
+            -f '$DROPBEAR_DIR/dropbear_rsa_host_key' \
+            -s 2048
     fi
 
     if [ ! -s '$DROPBEAR_DIR/dropbear_ecdsa_host_key' ]; then
-        '$DROPBEARKEY_REMOTE' -t ecdsa -f '$DROPBEAR_DIR/dropbear_ecdsa_host_key' -s 256
+        '$DROPBEARKEY_REMOTE' \
+            -t ecdsa \
+            -f '$DROPBEAR_DIR/dropbear_ecdsa_host_key' \
+            -s 256
     fi
 
     if [ ! -s '$DROPBEAR_DIR/dropbear_ed25519_host_key' ]; then
-        '$DROPBEARKEY_REMOTE' -t ed25519 -f '$DROPBEAR_DIR/dropbear_ed25519_host_key'
+        '$DROPBEARKEY_REMOTE' \
+            -t ed25519 \
+            -f '$DROPBEAR_DIR/dropbear_ed25519_host_key'
     fi
 
     chmod 0600 '$DROPBEAR_DIR/dropbear_'*_host_key
@@ -222,7 +317,11 @@ echo "Host keys:"
 
 echo "[9/12] Verifying Dropbear..."
 
-DROPBEAR_VERSION="$("${ADB[@]}" shell "'$DROPBEAR_REMOTE' -V" 2>&1 | tr -d '\r')"
+DROPBEAR_VERSION="$(
+    "${ADB[@]}" shell "'$DROPBEAR_REMOTE' -V" 2>&1 |
+    tr -d '\r'
+)"
+
 echo "$DROPBEAR_VERSION"
 
 # Make sure the binary can execute, but DO NOT start the server.
@@ -239,14 +338,19 @@ LAUNCHER="$TMP_DIR/dropbear-start"
 cat > "$LAUNCHER" <<EOF
 #!/system/bin/sh
 
-# Huawei B612s-25d / P750
+# Huawei B612s-25d
 # Persistent Dropbear startup helper.
+#
+# Root home directory was extracted from /etc/passwd
+# by the installer.
 #
 # Wait for br0 to receive the router LAN address before binding.
 # Dropbear is deliberately NOT run with -F so it daemonizes.
 
 IP="$ROUTER_IP"
 PORT="$SSH_PORT"
+ROOT_HOME="$ROOT_HOME"
+ROOT_SSH_DIR="\${ROOT_HOME}/.ssh"
 
 while true
 do
@@ -267,9 +371,10 @@ then
 fi
 
 # Start Dropbear in normal daemon mode.
-# Retry if another boot component temporarily prevents the bind.
+# Explicitly specify the authorized_keys directory.
 /system/bin/dropbear \
     -E \
+    -D "\${ROOT_SSH_DIR}" \
     -r /system/etc/dropbear/dropbear_rsa_host_key \
     -r /system/etc/dropbear/dropbear_ecdsa_host_key \
     -r /system/etc/dropbear/dropbear_ed25519_host_key \
@@ -289,6 +394,7 @@ sleep 3
 
 /system/bin/dropbear \
     -E \
+    -D "\${ROOT_SSH_DIR}" \
     -r /system/etc/dropbear/dropbear_rsa_host_key \
     -r /system/etc/dropbear/dropbear_ecdsa_host_key \
     -r /system/etc/dropbear/dropbear_ed25519_host_key \
@@ -306,6 +412,10 @@ echo
 echo "Installed launcher:"
 "${ADB[@]}" shell "ls -l '$DROPBEAR_START'"
 
+echo
+echo "Launcher configuration:"
+"${ADB[@]}" shell "cat '$DROPBEAR_START'"
+
 # ------------------------------------------------------------
 # 11/12 - Install autorun hook
 # ------------------------------------------------------------
@@ -318,7 +428,7 @@ cat > "$AUTORUN_BLOCK" <<'EOF'
 
 # ============================================================
 # DROPBEAR SSH SERVER
-# Huawei B612s-25d / P750
+# Huawei B612s-25d
 #
 # Dropbear is started by a separate background launcher.
 # The launcher waits for br0 / router IP before binding.
@@ -366,6 +476,24 @@ echo "Dropbear autorun hook:"
 echo "[12/12] Verifying installation..."
 
 echo
+echo "=== Root home directory ==="
+echo "$ROOT_HOME"
+
+echo
+echo "=== Root SSH directory ==="
+"${ADB[@]}" shell "ls -ld '$ROOT_SSH_DIR'"
+
+echo
+echo "=== authorized_keys ==="
+"${ADB[@]}" shell "
+    if [ -f '$ROOT_SSH_DIR/authorized_keys' ]; then
+        ls -l '$ROOT_SSH_DIR/authorized_keys'
+    else
+        echo 'authorized_keys not present yet.'
+    fi
+"
+
+echo
 echo "=== Dropbear binary ==="
 "${ADB[@]}" shell "ls -l '$DROPBEAR_REMOTE'"
 
@@ -383,7 +511,9 @@ echo "=== Autorun backup ==="
 
 echo
 echo "=== Autorun Dropbear hook ==="
-"${ADB[@]}" shell "grep -n -A12 -B2 'DROPBEAR SSH SERVER' '$AUTORUN'"
+"${ADB[@]}" shell "
+    grep -n -A12 -B2 'DROPBEAR SSH SERVER' '$AUTORUN'
+"
 
 echo
 echo "=== Current Dropbear processes ==="
@@ -391,11 +521,13 @@ echo "=== Current Dropbear processes ==="
 
 echo
 echo "=== Current SSH port ==="
-"${ADB[@]}" shell "busyboxx netstat -tunlp 2>/dev/null | grep ':$SSH_PORT' || true"
+"${ADB[@]}" shell "
+    busyboxx netstat -tunlp 2>/dev/null |
+    grep ':$SSH_PORT' || true
+"
 
 echo
 echo "============================================================"
 echo "Dropbear installation is finished. Please reboot"
 echo "============================================================"
 echo
-
