@@ -60,7 +60,7 @@ No modification of `/init.rc` or `/init.huawei.rc` is required.
 
 ### Password login is not supported on this Huawei B612 firmware
 
-On the Huawei B612s-25d / P750 firmware tested with this project, SSH password authentication does not work reliably because of the way the Huawei/Android-based system handles the root password database.
+On the Huawei B612s-25d firmware tested with this project, SSH password authentication does not work reliably because of the way the Huawei/Android-based system handles the root password database.
 
 The device contains:
 
