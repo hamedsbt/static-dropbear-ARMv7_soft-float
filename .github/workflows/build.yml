@@ -82,7 +82,30 @@ jobs:
 
           git describe --tags --always
           git rev-parse HEAD
+          
+      - name: Configure Android PATH defaults
+        working-directory: dropbear
+        run: |
+          set -euo pipefail
 
+          cat > localoptions.h <<'EOF'
+          #ifndef DROPBEAR_LOCALOPTIONS_H
+          #define DROPBEAR_LOCALOPTIONS_H
+
+          /*
+           * Huawei B612s-25d / P750 Android 4.4.1
+           *
+           * Android system commands live in /system/bin and
+           * Huawei utilities such as busyboxx live in /system/xbin.
+           */
+          #define DEFAULT_PATH "/system/xbin:/system/bin:/system/sbin:/sbin:/usr/sbin:/usr/bin:/bin"
+          #define DEFAULT_ROOT_PATH "/system/xbin:/system/bin:/system/sbin:/sbin:/usr/sbin:/usr/bin:/bin"
+
+          #endif
+          EOF
+
+          cat localoptions.h
+          
       - name: Prepare ARM sysroot
         run: |
           set -euxo pipefail
